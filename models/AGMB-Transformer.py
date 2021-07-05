@@ -1,7 +1,4 @@
-"""
-AGMB-Transformer in pytorch
 
-"""
 
 import math
 import torch
@@ -12,9 +9,7 @@ import numpy as np
 
 BATCH_NORM_DECAY = 1 - 0.9  # pytorch batch norm `momentum = 1 - counterpart` of tensorflow
 BATCH_NORM_EPSILON = 1e-5
-CARDINALITY = 32
-DEPTH = 4
-BASEWIDTH = 64
+
 
 def get_act(activation):
     """Only supports ReLU and SiLU/Swish."""
@@ -115,6 +110,9 @@ class RelPosSelfAttention(nn.Module):
 
 
 class AbsPosSelfAttention(nn.Module):
+    """
+
+    """
 
     def __init__(self, W, H, dkh, absolute=True, fold_heads=False):
         super(AbsPosSelfAttention, self).__init__()
@@ -151,6 +149,7 @@ class AbsPosSelfAttention(nn.Module):
 
 
 class GroupPointWise(nn.Module):
+    """"""
 
     def __init__(self, in_channels, heads=4, proj_factor=1, target_dimension=None):
         super(GroupPointWise, self).__init__()
@@ -179,6 +178,8 @@ class GroupPointWise(nn.Module):
 
 
 class MHSA(nn.Module):
+    """
+    """
 
     def __init__(self, in_channels, heads, curr_h, curr_w, pos_enc_type='relative', use_pos=True):
         super(MHSA, self).__init__()
@@ -201,7 +202,140 @@ class MHSA(nn.Module):
         return o
 
 
+
+class GTBotBlock(nn.Module):
+
+
+    def __init__(self, in_dimension, curr_h, curr_w, proj_factor=4, activation='relu', pos_enc_type='relative',
+                 stride=1, target_dimension=2048):
+        super(GTBotBlock, self).__init__()
+        if stride != 1 or in_dimension != target_dimension:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_dimension, target_dimension, kernel_size=1, stride=stride),
+                BNReLU(target_dimension, activation=activation, nonlinearity=True),
+            )
+        else:
+            self.shortcut = None
+
+        bottleneck_dimension = target_dimension // proj_factor
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_dimension, bottleneck_dimension, kernel_size=1, stride=1),
+            BNReLU(bottleneck_dimension, activation=activation, nonlinearity=True)
+        )
+
+        self.mhsa = MHSA(in_channels=bottleneck_dimension, heads=4, curr_h=curr_h, curr_w=curr_w,
+                         pos_enc_type=pos_enc_type)
+        conv2_list = []
+        if stride != 1:
+            assert stride == 2, stride
+            conv2_list.append(nn.AvgPool2d(kernel_size=(2, 2), stride=(2, 2)))  # TODO: 'same' in tf.pooling
+        conv2_list.append(BNReLU(bottleneck_dimension, activation=activation, nonlinearity=True))
+        self.conv2 = nn.Sequential(*conv2_list)
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(bottleneck_dimension, target_dimension, kernel_size=1, stride=1),
+            BNReLU(target_dimension, nonlinearity=False, init_zero=True),
+        )
+
+        self.last_act = get_act(activation)
+
+
+    def forward(self, x):
+        if self.shortcut is not None:
+            shortcut = self.shortcut(x)
+        else:
+            shortcut = x
+
+        out = self.conv1(x)
+        Q_h = Q_w = 4
+        N, C, H, W = out.shape
+        P_h, P_w = H // Q_h, W // Q_w
+
+        out = out.reshape(N * P_h * P_w, C, Q_h, Q_w)
+        out = self.mhsa(out)
+        out = out.permute(0, 3, 1, 2)  # back to pytorch dim order
+        out = self.conv2(out)
+
+        N1, C1, H1, W1 = out.shape
+        out = out.reshape(N, C1, int(H1 * (N1 / N) ** 0.5), int(W1 * (N1 / N) ** 0.5))
+
+        out = self.conv3(out)
+
+        out += shortcut
+        out = self.last_act(out)
+
+        return out
+
+
+
+class GTBotBlock2(nn.Module):
+
+    def __init__(self, in_dimension, curr_h, curr_w, proj_factor=4, activation='relu', pos_enc_type='relative',
+                 stride=1, target_dimension=2048):
+        super(GTBotBlock2, self).__init__()
+        if stride != 1 or in_dimension != target_dimension:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_dimension, target_dimension, kernel_size=1, stride=stride),
+                BNReLU(target_dimension, activation=activation, nonlinearity=True),
+            )
+        else:
+            self.shortcut = None
+
+        bottleneck_dimension = target_dimension // proj_factor
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_dimension, bottleneck_dimension, kernel_size=1, stride=1),
+            BNReLU(bottleneck_dimension, activation=activation, nonlinearity=True)
+        )
+
+        self.mhsa = MHSA(in_channels=bottleneck_dimension, heads=4, curr_h=curr_h, curr_w=curr_w,
+                         pos_enc_type=pos_enc_type)
+        conv2_list = []
+        if stride != 1:
+            assert stride == 2, stride
+            conv2_list.append(nn.AvgPool2d(kernel_size=(2, 2), stride=(2, 2)))  # TODO: 'same' in tf.pooling
+        conv2_list.append(BNReLU(bottleneck_dimension, activation=activation, nonlinearity=True))
+        self.conv2 = nn.Sequential(*conv2_list)
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(bottleneck_dimension, target_dimension, kernel_size=1, stride=1),
+            BNReLU(target_dimension, nonlinearity=False, init_zero=True),
+        )
+
+        self.last_act = get_act(activation)
+
+
+    def forward(self, x):
+        if self.shortcut is not None:
+            shortcut = self.shortcut(x)
+        else:
+            shortcut = x
+
+
+        out = self.conv1(x)
+
+        Q_h = Q_w = 8
+        N, C, H, W = out.shape
+        P_h, P_w = H // Q_h, W // Q_w
+
+        out = out.reshape(N * P_h * P_w, C, Q_h, Q_w)
+
+        out = self.mhsa(out)
+        out = out.permute(0, 3, 1, 2)  # back to pytorch dim order
+        out = self.conv2(out)
+
+        N1, C1, H1, W1 = out.shape
+        out = out.reshape(N, C1, int(H1 * (N1 / N) ** 0.5), int(W1 * (N1 / N) ** 0.5))
+
+        out = self.conv3(out)
+        out += shortcut
+        out = self.last_act(out)
+
+        return out
+
+
+
 class BotBlock(nn.Module):
+
     def __init__(self, in_dimension, curr_h, curr_w, proj_factor=4, activation='relu', pos_enc_type='relative',
                  stride=1, target_dimension=2048):
         super(BotBlock, self).__init__()
@@ -237,8 +371,10 @@ class BotBlock(nn.Module):
 
     def forward(self, x):
         out = self.conv1(x)
+
         out = self.mhsa(out)
         out = out.permute(0, 3, 1, 2)  # back to pytorch dim order
+
         out = self.conv2(out)
         out = self.conv3(out)
 
@@ -251,12 +387,19 @@ class BotBlock(nn.Module):
         return out
 
 
-class AGMB-TransformerBottleNeckC(nn.Module):
+CARDINALITY = 32
+DEPTH = 4
+BASEWIDTH = 64
+
+
+
+class AGGTNeckC(nn.Module):
 
     def __init__(self, in_channels, out_channels, stride):
         super().__init__()
 
         C = CARDINALITY #How many groups a feature map was splitted into
+
         D = int(DEPTH * out_channels / BASEWIDTH) #number of channels per group
         self.split_transforms = nn.Sequential(
             nn.Conv2d(in_channels, C * D, kernel_size=1, groups=C, bias=False),
@@ -280,14 +423,14 @@ class AGMB-TransformerBottleNeckC(nn.Module):
     def forward(self, x):
         return F.relu(self.split_transforms(x) + self.shortcut(x))
 
-class AGMB-Transformer(nn.Module):
+class AGGT(nn.Module):
 
     def __init__(self, block, num_blocks, class_names=3):
         super().__init__()
         self.in_channels = 64
 
         self.conv1 = nn.Sequential(
-            nn.Conv2d(4, 64, 3, stride=1, padding=1, bias=False),
+            nn.Conv2d(3, 64, 3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True)
         )
@@ -295,9 +438,11 @@ class AGMB-Transformer(nn.Module):
         self.conv2 = self._make_layer(block, num_blocks[0], 64, 1)
         self.conv3 = self._make_layer(block, num_blocks[1], 128, 2)
         self.conv4 = self._make_layer(block, num_blocks[2], 256, 2)
-        self.downsample = self._make_downsample_layer()
-        self.conv5 = self._make_layer(block, num_blocks[3], 512, 2)
-        self.conv5_1_x = self._make_MHSA_layer(block, 512, num_blocks[3], 2)
+        #self.downsample = self._make_downsample_layer()
+        self.conv5 = self._make_gt_layer2(1024,2048)
+        self.conv5_1_x = self._make_layer(block, num_blocks[3], 512, 2)
+
+
         planes=1024
         self.globalAvgPool = nn.AdaptiveAvgPool2d(1)
         self.fc1 = nn.Linear(in_features=planes * 4, out_features=round(planes / 2))
@@ -310,17 +455,17 @@ class AGMB-Transformer(nn.Module):
         )
 
         self.avg = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * 4, 3)
+        self.fc = nn.Linear(512 * 4*2, 3)
 
     def forward(self, x):
         x = self.conv1(x)
         x = self.conv2(x)
         x = self.conv3(x)
         x = self.conv4(x)
-        downsample=self.downsample(x)
+
         output1 = self.conv5(x)
-        output2 = self.conv5_1_x(downsample)
-        output2 = F.interpolate(output2, size=(output1.size(2), output1.size(3)), mode='bilinear', align_corners=False)
+        output2 = self.conv5_1_x(x)
+
         output = torch.cat([output1, output2], 1)
 
         out = self.globalAvgPool(output)
@@ -329,25 +474,31 @@ class AGMB-Transformer(nn.Module):
         out = self.relu(out)
         out = self.fc2(out)
         out = self.sigmoid(out)
-        array = out.cpu().detach().numpy()
-        outchanel = torch.zeros(array.shape[0],2048,16,16)
-        outweight = torch.zeros(out.shape[0],64)
+        array=out.cpu().detach().numpy()
+        outchanel=torch.zeros(array.shape[0],2048,16,16)
+
         for i in range(array.shape[0]):
-            asum = array
-            median = np.median(asum)
-            posi = np.where(asum>median)
+            asum=array
+            median=np.median(asum)
+
+            posi=np.where(asum>median)
             if(len(posi[0])!=32):
-                n = 32-len(posi[0])
-                mid = np.where(asum == median)[0][0:n]
+                n=32-len(posi[0])
+                mid=np.where(asum == median)[0][0:n]
                 if(len(mid)==1):
-                    mid = (mid,)
-                posi = (np.append(posi[0],mid),)
-            posinew = np.array([])
+                    mid=(mid,)
+                posi=(np.append(posi[0],mid),)
+
+            posinew=np.array([])
             for p in range(0,32):
                 posinew = np.append(posinew, np.arange(posi[0][p]*64,(posi[0][p]+1)*64))
-            outchanel[i] =( output[i, posinew, :, :] )
-        output = outchanel.cuda()
+
+            outchanel[i] =( output[i, posinew, :, :])
+
+        output=outchanel.cuda()
+
         output = self.conv6(output)
+
 
         x = self.avg(output)
         x = x.view(x.size(0), -1)
@@ -365,9 +516,9 @@ class AGMB-Transformer(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def _make_MHSA_layer(self, block, out_channels, num_blocks, stride):
+    def _make_last_layer(self, block, out_channels, num_blocks, stride):
 
-        W = H = 16
+        W = H = 32
         dim_in = 1024
         dim_out = 2048
 
@@ -383,17 +534,52 @@ class AGMB-Transformer(nn.Module):
 
         return nn.Sequential(*stage5)
 
-    def _make_downsample_layer(self,activation='relu'):
-        downsample = nn.Sequential(
-            nn.Conv2d(1024, 1024, kernel_size=3, stride=2,padding=1, bias=False),
-            BNReLU(1024, activation=activation, nonlinearity=True)
+    def _make_gt_layer(self, ch_in, ch_out):
+
+        W = H = 8
+        dim_in = ch_in
+        dim_out = ch_out
+
+        stage = []
+        for i in range(3):
+            stage.append(
+                GTBotBlock(in_dimension=dim_in, curr_h=H, curr_w=W, stride=2 if i == 0 else 1, target_dimension=dim_out)
+            )
+            dim_in = dim_out
+
+        return nn.Sequential(*stage)
+
+    def _make_gt_layer2(self, ch_in, ch_out):
+
+        W = H = 8
+        dim_in = ch_in
+        dim_out = ch_out
+
+        stage = []
+        stage.append(
+            GTBotBlock(in_dimension=dim_in, curr_h=4, curr_w=4, stride=2 if 0 == 0 else 1, target_dimension=dim_out)
+        )
+        dim_in = dim_out
+
+        stage.append(
+            GTBotBlock2(in_dimension=dim_in, curr_h=H, curr_w=W, stride=2 if 1 == 0 else 1, target_dimension=dim_out)
+        )
+        dim_in = dim_out
+
+        stage.append(
+            BotBlock(in_dimension=dim_in, curr_h=16, curr_w=16, stride=2 if 2 == 0 else 1, target_dimension=dim_out)
         )
 
-        return downsample
+        return nn.Sequential(*stage)
 
-def AGMB-Transformer():
-    """ return a AGMB-Transformer network
-    """
-    return AGMB-Transformer(AGMB-TransformerBottleNeckC, [3, 4, 6, 3])
+
+
+
+def AGGT50():
+
+    return AGGT(AGGTNeckC, [3, 4, 6, 3])
+
+
+
 
 
