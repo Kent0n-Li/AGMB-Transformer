@@ -1,7 +1,7 @@
 # 1. Describe
 ## 1.1 Network Architecture
 The architecture of our multi-branch Transformer network.
-#![architecture ](resources/AGMB.png)
+![architecture ](resources/AGMB.pn)
 # 2. How to reproduce
 ## 2.1 Environmental preparation
 Install dependency package
