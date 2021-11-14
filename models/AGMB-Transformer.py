@@ -9,7 +9,7 @@ import numpy as np
 
 BATCH_NORM_DECAY = 1 - 0.9  # pytorch batch norm `momentum = 1 - counterpart` of tensorflow
 BATCH_NORM_EPSILON = 1e-5
-
+type = 0
 
 def get_act(activation):
     """Only supports ReLU and SiLU/Swish."""
@@ -250,15 +250,20 @@ class GTBotBlock(nn.Module):
         Q_h = Q_w = 4
         N, C, H, W = out.shape
         P_h, P_w = H // Q_h, W // Q_w
-
+        
+        if type == 1:
+            out = out.reshape(N, C, P_h, Q_h, P_w, Q_w)
+            out = out.permute(0, 2, 4, 1, 3, 5)
         out = out.reshape(N * P_h * P_w, C, Q_h, Q_w)
         out = self.mhsa(out)
         out = out.permute(0, 3, 1, 2)  # back to pytorch dim order
+        
         out = self.conv2(out)
-
         N1, C1, H1, W1 = out.shape
+        if type == 1:
+            out = out.reshape(N , P_h , P_w, C, int(Q_h/2), int(Q_w/2))
+            out = out.permute(0, 3, 1, 4, 2, 5)
         out = out.reshape(N, C1, int(H1 * (N1 / N) ** 0.5), int(W1 * (N1 / N) ** 0.5))
-
         out = self.conv3(out)
 
         out += shortcut
@@ -317,6 +322,9 @@ class GTBotBlock2(nn.Module):
         N, C, H, W = out.shape
         P_h, P_w = H // Q_h, W // Q_w
 
+        if type == 1:
+            out = out.reshape(N, C, P_h, Q_h, P_w, Q_w)
+            out = out.permute(0, 2, 4, 1, 3, 5)
         out = out.reshape(N * P_h * P_w, C, Q_h, Q_w)
 
         out = self.mhsa(out)
@@ -324,6 +332,9 @@ class GTBotBlock2(nn.Module):
         out = self.conv2(out)
 
         N1, C1, H1, W1 = out.shape
+        if type == 1:
+            out = out.reshape(N , P_h , P_w, C, int(Q_h/2), int(Q_w/2))
+            out = out.permute(0, 3, 1, 4, 2, 5)
         out = out.reshape(N, C1, int(H1 * (N1 / N) ** 0.5), int(W1 * (N1 / N) ** 0.5))
 
         out = self.conv3(out)
